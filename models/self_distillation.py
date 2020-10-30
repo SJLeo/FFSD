@@ -26,10 +26,12 @@ class SelfDistillationModel(nn.Module):
 
         self.layer_num = layer_num
         self.total_feature_maps = {}
-        channel_index = 0
+        output_channel = int(input_channel / 2)
 
         for i in range(layer_num):
-            setattr(self, 'layer%d' % i, SelfDistillationModule(input_channel[i], input_channel[i+1]))
+            setattr(self, 'layer%d' % i, SelfDistillationModule(input_channel, output_channel))
+            input_channel = output_channel
+            output_channel = int(input_channel / 2)
 
         self.register_hook()
 
