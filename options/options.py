@@ -15,12 +15,8 @@ parser.add_argument('--model', type=str, default='resnet32', help='chooses which
 
 
 # dataset parameters
-parser.add_argument('--num_threads', default=8, type=int, help='# threads for loading data. default:8')
 parser.add_argument('--train_batch_size', type=int, default=128, help='input batch size. default:128')
 parser.add_argument('--test_batch_size', type=int, default=128, help='input batch size. default:128')
-parser.add_argument('--shuffle', action='store_true', help='if true, takes images in order to make batches, otherwise takes them randomly')
-parser.add_argument('--num_workers', default=8, type=int, help='# threads for loading data. default:8')
-parser.add_argument('--display_winsize', type=int, default=256, help='display window size for both visdom and HTML')
 
 
 # train parameter
@@ -33,47 +29,28 @@ parser.add_argument('--display_port', type=int, default=8097, help='visdom port 
 parser.add_argument('--update_html_freq', type=int, default=1000, help='frequency of saving training results to html')
 parser.add_argument('--print_freq', type=int, default=100, help='frequency of showing training results on console')
 parser.add_argument('--no_html', action='store_true', help='do not save intermediate training results to [opt.checkpoints_dir]/[opt.name]/web/')
+parser.add_argument('--display_winsize', type=int, default=256, help='display window size for both visdom and HTML')
+
 
 parser.add_argument('--continue_train', action='store_true', help='continue training: load the latest model')
 parser.add_argument('--start_epoch', type=int, default=1, help='the starting epoch count, we save the model by <epoch_count>, <epoch_count>+<save_latest_freq>, ... default:1')
 parser.add_argument('--n_epochs', type=int, default=300, help='number of epochs for training. default:100')
-# parser.add_argument('--n_epochs_decay', type=int, default=100, help='number of epochs to linearly decay learning rate to zero. default:100')
-
 parser.add_argument('--lr', type=float, default=0.1, help='initial learning rate for sgd. default:0.1')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum term of sgd. default:0.9')
 parser.add_argument('--weight_decay', type=float, default=1e-4, help='weight decay term of sgd. default:1e-4')
-parser.add_argument('--leader_weight_decay', type=float, default=1e-4, help='weight decay term of sgd. default:1e-4')
-
-
 parser.add_argument('--lr_policy', type=str, default='step', help='learning rate policy. [linear | step | plateau | cosine]')
 parser.add_argument('--lr_decay_iters', type=int, nargs='+', default=[150, 225], help='the iterval of learn rate. default:150, 225')
 parser.add_argument('--lr_decay_gamma', type=float, default=0.1, help='the decay gamma of learn rate. default:0.1')
 
-# parser.add_argument('--lr_decay_iters', type=int, default=100, help='multiply by a gamma every lr_decay_iters iterations')
-
 # mutula learing
 parser.add_argument('--model_num', type=int, default=2, help='the number of models for online kd. default:2.')
 parser.add_argument('--temperature', type=int, default=2, help='the temperature for online kd. default:2.')
-parser.add_argument('--lambda_logit', type=float, default=1.0, help='the coefficient for online logit distillation. default:0.0')
-parser.add_argument('--lambda_ensemble', type=float, default=1.0, help='the coefficient for online ensemble learning. default:0.0')
-parser.add_argument('--lambda_diversity', type=float, default=0.0, help='the coefficient for model diversity loss. default:0.0')
-parser.add_argument('--lambda_fusion', type=float, default=0.0, help='the coefficient for fusion model. default:0.0')
-parser.add_argument('--lambda_trans_fusion', type=float, default=0.0)
-parser.add_argument('--lambda_self_distillation_fusion', type=float, default=0.0)
-parser.add_argument('--lambda_self_distillation_feature', type=float, default=0.0)
-parser.add_argument('--lambda_self_distillation_attention', type=float, default=0.0)
-
-parser.add_argument('--diversity_loss_type', type=str, default='Diversity', help='the type of attention loss. default:Diversity')
-parser.add_argument('--fusion_loss_type', type=str, default='MMD', help='the type of fusion loss. default:MMD')
-
+parser.add_argument('--lambda_diversity', type=float, default=1e-5, help='the coefficient for model diversity loss. default:1e-5')
+parser.add_argument('--lambda_fusion', type=float, default=10.0, help='the coefficient of distilling the fusion knowledge for the student leader. default:10.0')
+parser.add_argument('--lambda_self_distillation', type=float, default=1000.0, help='the coefficient for self-distillation train loss. default:1000.0')
 
 parser.add_argument('--load_path1', type=str, default=None, help='The path of load model. default:None')
 parser.add_argument('--load_path2', type=str, default=None, help='The path of load model. default:None')
-# parser.add_argument('--augument', action='store_true')
-parser.add_argument('--local_rank', default=-1, type=int,
-                    help='node rank for distributed training')
-
-
 
 
 def print_options(opt, parser):

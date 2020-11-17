@@ -178,7 +178,7 @@ class ResNet(nn.Module):
 
         def get_activation(maps, name):
             def get_output_hook(module, input, output):
-                maps[name] = output
+                maps[name+str(output.device)] = output
 
             return get_output_hook
 

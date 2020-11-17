@@ -6,7 +6,6 @@ import torch.nn.functional as F
 import os
 import time
 import math
-import torch.backends.cudnn as cudnn
 
 import utils.util as utils
 from data import create_dataLoader
@@ -14,7 +13,6 @@ from models import create_model
 from models.self_distillation import SelfDistillationModel
 from models.fusion_module import FusionModule
 
-import torch.distributed as dist
 
 class Trainer():
 
@@ -23,44 +21,29 @@ class Trainer():
         self.opt = opt
         self.opt.n_epochs = 90
         self.opt.lr_decay_iters = [30, 60, 80]
-        self.opt.train_batch_size = int(self.opt.train_batch_size / 4)
-
-        dist.init_process_group(backend='nccl')
-        # torch.cuda.set_device(self.opt.local_rank)
-
+        self.opt.train_batch_size = 256
+        self.opt.test_batch_size = 256
         self.opt.isTrain = True
         self.logger = logger
         self.device = torch.device(f'cuda:{opt.gpu_ids[0]}') if torch.cuda.is_available() else 'cpu'
 
-        self.epochs = self.opt.n_epochs
-        self.start_epochs = self.opt.start_epoch
+        self.epochs = opt.n_epochs
+        self.start_epochs = opt.start_epoch
         self.train_batch_size = self.opt.train_batch_size
         self.temperature = self.opt.temperature
 
         dataLoader = create_dataLoader(opt)
         self.trainLoader = dataLoader.trainLoader
         self.testLoader = dataLoader.testLoader
-        self.train_sampler = dataLoader.train_sampler
 
-        self.criterion_CE = nn.CrossEntropyLoss()
-        self.criterion_KL = nn.KLDivLoss(reduction='batchmean')
+        self.criterion_CE = nn.CrossEntropyLoss().to(self.device)
+        self.criterion_KL = nn.KLDivLoss(reduction='batchmean').to(self.device)
 
         self.model_num = opt.model_num
         self.models = []
         self.optimizers = []
         for i in range(self.model_num):
             model = create_model(opt).to(self.device)
-
-            if i == 0:
-                # noise_input = torch.randn((1, 3, 224, 224)).cuda(non_blocking=True)
-                # self.models[0](noise_input)
-                # trans_input = list(self.models[0].total_feature_maps.values())[-1]
-                # self.fusion_channel = trans_input.size(1)
-                # self.fusion_spatil = trans_input.size(2)
-                self.fusion_channel = 512
-                self.fusion_spatil = 7
-
-            model = nn.parallel.DistributedDataParallel(model, device_ids=[0, 1, 2, 3])
             optimizer = optim.SGD(model.parameters(), lr=opt.lr, momentum=opt.momentum,
                                   weight_decay=opt.weight_decay,
                                   nesterov=True)
@@ -71,53 +54,43 @@ class Trainer():
         self.init_fusion_module()
 
         self.leader_model = create_model(self.opt, leader=True, trans_fusion_info=(self.fusion_channel, self.model_num)).to(self.device)
-        self.leader_model = torch.nn.parallel.DistributedDataParallel(self.leader_model, device_ids=[0, 1, 2, 3])
         self.leader_optimizer = optim.SGD(self.leader_model.parameters(), lr=opt.lr, momentum=opt.momentum,
                                           weight_decay=self.opt.leader_weight_decay,
                                           nesterov=True)
-        cudnn.benchmark = True
 
     def init_self_ditsllation_models(self):
+
+        input_size = (1, 3, 224, 224)
+
+        noise_input = torch.randn(input_size).to(self.device)
+        self.models[0](noise_input)
+        trans_input = list(self.models[0].total_feature_maps.values())[-1]
+        self.fusion_channel = trans_input.size(1)
+        self.fusion_spatil = trans_input.size(2)
 
         self.sd_models = []
         self.sd_optimizers = []
         self.sd_schedulers = []
         for i in range(1, self.model_num):
-            sd_model = SelfDistillationModel(input_channel=self.fusion_channel,
-                                             layer_num=len(self.models[0].module.extract_layers) - 1).to(self.device)
-            sd_model = torch.nn.parallel.DistributedDataParallel(sd_model, device_ids=[0, 1, 2, 3])
+            sd_model = SelfDistillationModel(input_channel=trans_input.size(1),
+                                             layer_num=len(self.models[0].extract_layers) - 1).to(self.device)
             sd_optimizer = optim.Adam(sd_model.parameters(), weight_decay=self.opt.weight_decay)
             sd_scheduler = utils.get_scheduler(sd_optimizer, self.opt)
             self.sd_models.append(sd_model)
             self.sd_optimizers.append(sd_optimizer)
             self.sd_schedulers.append(sd_scheduler)
 
-        self.sd_leader_model = SelfDistillationModel(input_channel=self.fusion_channel,
-                                                     layer_num=len(self.models[0].module.extract_layers) - 1).to(self.device)
-        self.sd_leader_model = torch.nn.parallel.DistributedDataParallel(self.sd_leader_model, device_ids=[0, 1, 2, 3])
+        self.sd_leader_model = SelfDistillationModel(input_channel=trans_input.size(1),
+                                                     layer_num=len(self.models[0].extract_layers) - 1).to(self.device)
         self.sd_leader_optimizer = optim.Adam(self.sd_leader_model.parameters(), weight_decay=self.opt.weight_decay)
         self.sd_leader_scheduler = utils.get_scheduler(self.sd_leader_optimizer, self.opt)
 
     def init_fusion_module(self):
 
-        if self.opt.dataset == 'imagenet':
-            self.num_classes = 1000
-        elif self.opt.dataset == 'cifar10':
-            self.num_classes = 10
-        elif self.opt.dataset == 'cifar100':
-            self.num_classes = 100
-        else:
-            self.num_classes = 10
-
-        if str.startswith(self.opt.model, 'mobilenet'):
-            fc_dropout_rate = 0.2
-        else:
-            fc_dropout_rate = 0.0
+        self.num_classes = 1000
 
         self.fusion_module = FusionModule(self.fusion_channel, self.num_classes,
-                                          self.fusion_spatil, model_num=self.model_num,
-                                          dropout_rate=fc_dropout_rate).to(self.device)
-        self.fusion_module = torch.nn.parallel.DistributedDataParallel(self.fusion_module, device_ids=[0, 1, 2, 3])
+                                          self.fusion_spatil, model_num=self.model_num).to(self.device)
         self.fusion_optimizer = optim.SGD(self.fusion_module.parameters(), lr=self.opt.lr, momentum=self.opt.momentum,
                                           weight_decay=1e-5,
                                           nesterov=True)
@@ -142,8 +115,8 @@ class Trainer():
 
         for epoch in range(self.start_epochs, self.epochs):
 
+
             self.lambda_warmup(epoch)
-            self.train_sampler.set_epoch(epoch)
             self.train_with_test(epoch, topk=topk)
 
             test_losses, test_acc, test_top5_acc, test_avg_acc, test_ens_acc = self.test(epoch, topk=topk)
@@ -172,8 +145,8 @@ class Trainer():
                 best_ens_acc = test_ens_acc.avg
                 best_ens_epoch = epoch
 
-            for sd_scheduler in self.sd_schedulers:
-                sd_scheduler.step()
+            for scheduler in self.sd_schedulers:
+                scheduler.step()
             self.sd_leader_scheduler.step()
 
         best_msg = 'Best Models: '
@@ -236,12 +209,10 @@ class Trainer():
 
         for batch, (inputs, labels) in enumerate(self.trainLoader):
 
-
-            inputs = inputs.cuda(non_blocking=True)
-            labels = labels.cuda(non_blocking=True)
-            epoch_iter += self.train_batch_size
-
+            inputs, labels = inputs.to(self.device), labels.to(self.device)
             self.adjust_learning_rates(epoch, batch, dataset_size // self.train_batch_size)
+            
+            epoch_iter += self.train_batch_size
 
             ensemble_output = 0.0
             outputs = []
@@ -251,10 +222,10 @@ class Trainer():
             for i in range(self.model_num):
                 outputs.append(self.models[i](inputs))
                 ensemble_output += outputs[-1]
-                total_feature_maps.append(list(self.models[i].module.total_feature_maps.values()))
-                fusion_module_inputs.append(list(self.models[i].module.total_feature_maps.values())[-1].detach())
-            fusion_output = self.fusion_module(fusion_module_inputs[0], fusion_module_inputs[1])
+                total_feature_maps.append(list(self.models[i].total_feature_maps.values()))
+                fusion_module_inputs.append(list(self.models[i].total_feature_maps.values())[-1].detach())
             fusion_module_inputs = torch.cat(fusion_module_inputs, dim=1)
+            fusion_output = self.fusion_module(fusion_module_inputs)
             ensemble_output = ensemble_output / self.model_num
 
             # backward models
@@ -268,7 +239,7 @@ class Trainer():
                         loss_dml += self.criterion_KL(F.log_softmax(outputs[i] / self.temperature, dim=1),
                                                       F.softmax(outputs[j].detach() / self.temperature, dim=1))
 
-                if i != 0 and self.lambda_diversity > 0:
+                if i != 0:
                     current_attention_map = total_feature_maps[i][-1].pow(2).mean(1, keepdim=True)
                     other_attention_map = total_feature_maps[i - 1][-1].detach().pow(2).mean(1, keepdim=True)
                     loss_diversity = self.lambda_diversity * self.diversity_loss(current_attention_map,
@@ -281,7 +252,7 @@ class Trainer():
                 else:
                     loss_diversity = 0.0
                     loss_self_distllation = 0.0
-                loss_dml = self.lambda_logit * (self.temperature ** 2) * loss_dml / (self.model_num - 1)
+                loss_dml = (self.temperature ** 2) * loss_dml / (self.model_num - 1)
                 loss = loss_ce + loss_dml + loss_diversity + loss_self_distllation
 
                 # measure accuracy and record loss
@@ -299,7 +270,7 @@ class Trainer():
 
             # backward fusion module
             loss_fusion_ce = self.criterion_CE(fusion_output, labels)
-            loss_fusion_ensemble = self.lambda_ensemble * (self.temperature ** 2) * self.criterion_KL(
+            loss_fusion_ensemble = (self.temperature ** 2) * self.criterion_KL(
                 F.log_softmax(fusion_output / self.temperature, dim=1),
                 F.softmax(ensemble_output.detach() / self.temperature, dim=1))
             loss_fusion = loss_fusion_ce + loss_fusion_ensemble
@@ -314,18 +285,18 @@ class Trainer():
             fusion_accuracy.update(fusion_prec[0], inputs.size(0))
 
             # backward leader models
-            leader_feature_maps = list(self.leader_model.module.total_feature_maps.values())
+            leader_feature_maps = list(self.leader_model.total_feature_maps.values())
             loss_leader_ce = self.criterion_CE(leader_output, labels)
-            loss_leader_ensemble = self.lambda_ensemble * (self.temperature ** 2) * self.criterion_KL(
+            loss_leader_ensemble = (self.temperature ** 2) * self.criterion_KL(
                 F.log_softmax(leader_output / self.temperature, dim=1),
                 F.softmax(fusion_output.detach() / self.temperature, dim=1))
             loss_leader_fusion = self.lambda_fusion * self.fusion_loss(
                 leader_feature_maps[-1].pow(2).mean(1, keepdim=True),
-                list(self.fusion_module.module.total_feature_maps.values())[-1].detach().pow(2).mean(1, keepdim=True))
-            loss_leader_trans_fusion = self.lambda_trans_fusion * \
+                list(self.fusion_module.total_feature_maps.values())[-1].detach().pow(2).mean(1, keepdim=True))
+            loss_leader_trans_fusion = self.lambda_fusion * \
                                        self.fusion_loss(leader_trans_fusion_output.pow(2).mean(1, keepdim=True),
                                                            fusion_module_inputs.pow(2).mean(1, keepdim=True))
-            loss_leader_self_distillation = self.lambda_self_distillation_fusion * \
+            loss_leader_self_distillation = self.lambda_fusion * \
                                             self.self_distillation_loss(self.sd_leader_model, leader_feature_maps,
                                                                         input_feature_map=list(
                                                                             self.fusion_module.total_feature_maps.values())[
@@ -373,7 +344,6 @@ class Trainer():
 
                 msg = 'Epoch[{}] ({}/{})\tTime {:.2f}s\t'.format(
                     epoch, batch * self.train_batch_size, len(self.trainLoader.dataset), cost_time)
-
                 for i in range(self.model_num):
 
                     msg += '|Model[{}]: Loss:{:.4f}\t' \
@@ -428,9 +398,7 @@ class Trainer():
         start_time = time.time()
         with torch.no_grad():
             for batch_idx, (inputs, labels) in enumerate(self.testLoader):
-
-                inputs = inputs.cuda(non_blocking=True)
-                labels = labels.cuda(non_blocking=True)
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
 
                 outputs = []
                 fusion_module_inputs = []
@@ -438,7 +406,8 @@ class Trainer():
                 for i in range(self.model_num):
                     outputs.append(self.models[i](inputs))
                     fusion_module_inputs.append(list(self.models[i].total_feature_maps.values())[-1].detach())
-                fusion_output = self.fusion_module(fusion_module_inputs[0], fusion_module_inputs[1])
+                fusion_module_inputs = torch.cat(fusion_module_inputs, dim=1)
+                fusion_output = self.fusion_module(fusion_module_inputs)
 
                 # measure accuracy and record loss
                 for i in range(self.model_num):
@@ -489,10 +458,10 @@ class Trainer():
             attention_map = feature_map.pow(2).mean(1, keepdim=True)
             target_attenion_map = target_feature_maps[i].detach().pow(2).mean(1, keepdim=True)
 
-            sd_feature_loss += self.lambda_self_distillation_feature * \
+            sd_feature_loss += self.lambda_self_distillation * \
                                self.attention_loss(feature_map,
                                                    target_feature_maps[i].detach())
-            sd_attention_loss += self.lambda_self_distillation_attention * \
+            sd_attention_loss += self.lambda_self_distillation * \
                                  self.attention_loss(attention_map,
                                                      target_attenion_map)
 
@@ -533,14 +502,9 @@ class Trainer():
             else:
                 return lambda_coeff
 
-        self.lambda_logit = warmup(self.opt.lambda_logit, epoch)
-        self.lambda_ensemble = warmup(self.opt.lambda_ensemble, epoch)
         self.lambda_diversity = warmup(self.opt.lambda_diversity, epoch)
         self.lambda_fusion = warmup(self.opt.lambda_fusion, epoch)
-        self.lambda_trans_fusion = warmup(self.opt.lambda_trans_fusion, epoch)
-        self.lambda_self_distillation_fusion = warmup(self.opt.lambda_self_distillation_fusion, epoch)
-        self.lambda_self_distillation_feature = warmup(self.opt.lambda_self_distillation_feature, epoch)
-        self.lambda_self_distillation_attention = warmup(self.opt.lambda_self_distillation_attention, epoch)
+        self.lambda_self_distillation = warmup(self.opt.lambda_self_distillation, epoch)
 
     def diversity_target(self, y):
 
@@ -564,10 +528,6 @@ class Trainer():
 
     def fusion_loss(self, x, y):
 
-        # x = x.view(x.size(0), -1)
-        # y = y.view(y.size(0), -1)
-        # return utils.mmd(x, y)
-
         x = F.normalize(x.view(x.size(0), -1))
         y = F.normalize(y.view(y.size(0), -1))
         return (x - y).pow(2).mean()
@@ -590,7 +550,7 @@ class Trainer():
         save_dir = os.path.join(opt.checkpoints_dir, opt.name, 'checkpoints')
         utils.mkdirs(save_dir)
         ckpt = {
-            'weight': model.module.state_dict(),
+            'weight': model.state_dict(),
             'epoch': epoch,
             'cfg': opt.model,
             'index': name

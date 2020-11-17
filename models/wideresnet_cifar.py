@@ -125,10 +125,3 @@ def wideresnet1602(**kwargs):
 
 def wideresnet4002(**kwargs):
     return Wide_ResNet(40, 2, 0, **kwargs)
-
-
-if __name__ == '__main__':
-    net=Wide_ResNet(28, 10, 0.3, 100)
-    y = net(torch.randn(1,3,32,32))
-
-    print(y.size())

@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
-from torchsummary import summary
 from models.fusion_module import TransFusionModule
 
 import math
 
-__all__ = ['ResNet', 'resnet20', 'resnet56', 'resnet32', 'resnet110', 'wide_resnet20_8']
+__all__ = ['resnet20', 'resnet32', 'resnet56']
 
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
@@ -239,36 +238,3 @@ def resnet32(**kwargs):
 def resnet56(**kwargs):
 
     return ResNet(BasicBlock, [9, 9, 9], **kwargs)
-
-def resnet110(**kwargs):
-    """
-    Constructs a ResNet-110 model.
-    """
-    
-    return ResNet(Bottleneck, [12, 12, 12], **kwargs)
-
-def wide_resnet20_8(pretrained=False, path=None, **kwargs):
-    
-    """Constructs a Wide ResNet-28-10 model.
-    The model is the same as ResNet except for the bottleneck number of channels
-    which is twice larger in every block. The number of channels in outer 1x1
-    convolutions is the same, e.g. last block in ResNet-50 has 2048-512-2048
-    channels, and in Wide ResNet-50-2 has 2048-1024-2048.
-    Args:
-        pretrained (bool): If True, returns a model pre-trained.
-    """
-    
-    model = ResNet(Bottleneck, [2, 2, 2], width_per_group = 64 * 8, **kwargs)
-    if pretrained:
-        model.load_state_dict((torch.load(path))['state_dict'])
-    return model
-
-def resnet1602(**kwargs):
-
-    return ResNet(Bottleneck, [2, 2, 2], width_per_group=64 * 2, **kwargs)
-
-if __name__ == "__main__":
-
-    model = resnet32(num_classes=100, leader=True)
-    print(model)
-    summary(model, (3, 32, 32), batch_size=1)

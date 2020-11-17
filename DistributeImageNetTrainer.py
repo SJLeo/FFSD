@@ -6,12 +6,10 @@ import torch.nn.functional as F
 import os
 import time
 import math
-from collections import OrderedDict
 
 import utils.util as utils
-from data import create_dataLoader
 from models import create_model
-from utils.visualizer import Visualizer
+from data import create_dataLoader
 from models.self_distillation import SelfDistillationModel, DIYSelfDistillationModel
 from models.fusion_module import FusionModule
 
@@ -21,9 +19,11 @@ class Trainer():
     def __init__(self, opt, logger):
 
         self.opt = opt
+        self.opt.n_epochs = 90 if str.startswith(self.opt.model, 'resnet') else 180 # mobilenet 180 epoch
+        self.opt.lr_decay_iters = [30, 60, 80] if str.startswith(self.opt.model, 'resnet') else [60, 120, 160]
+        # self.opt.train_batch_size = 256
         self.opt.isTrain = True
         self.logger = logger
-        self.visualizer = Visualizer(opt)
         self.device = torch.device(f'cuda:{opt.gpu_ids[0]}') if torch.cuda.is_available() else 'cpu'
 
         self.epochs = opt.n_epochs
@@ -35,42 +35,37 @@ class Trainer():
         self.trainLoader = dataLoader.trainLoader
         self.testLoader = dataLoader.testLoader
 
-        self.criterion_CE = nn.CrossEntropyLoss().to(self.device)
-        self.criterion_KL = nn.KLDivLoss(reduction='batchmean').to(self.device)
+        self.criterion_CE = nn.CrossEntropyLoss()
+        self.criterion_KL = nn.KLDivLoss(reduction='batchmean')
 
         self.model_num = opt.model_num
         self.models = []
         self.optimizers = []
-        self.schedulers = []
         for i in range(self.model_num):
             model = create_model(opt).to(self.device)
+            model = nn.DataParallel(model, device_ids=self.opt.gpu_ids)
             optimizer = optim.SGD(model.parameters(), lr=opt.lr, momentum=opt.momentum,
                                   weight_decay=opt.weight_decay,
                                   nesterov=True)
-            scheduler = utils.get_scheduler(optimizer, opt)
             self.models.append(model)
             self.optimizers.append(optimizer)
-            self.schedulers.append(scheduler)
 
         self.init_self_ditsllation_models()
         self.init_fusion_module()
 
         self.leader_model = create_model(self.opt, leader=True, trans_fusion_info=(self.fusion_channel, self.model_num)).to(self.device)
+        self.leader_model = nn.DataParallel(self.leader_model, device_ids=self.opt.gpu_ids)
         self.leader_optimizer = optim.SGD(self.leader_model.parameters(), lr=opt.lr, momentum=opt.momentum,
                                           weight_decay=self.opt.leader_weight_decay,
                                           nesterov=True)
-        self.leader_scheduler = utils.get_scheduler(self.leader_optimizer, opt)
 
     def init_self_ditsllation_models(self):
 
-        if str.startswith(self.opt.dataset, 'cifar'):
-            input_size = (1, 3, 32, 32)
-        else:
-            input_size = (1, 3, 224, 224)
+        input_size = (1, 3, 224, 224)
 
         noise_input = torch.randn(input_size).to(self.device)
         self.models[0](noise_input)
-        trans_input = list(self.models[0].total_feature_maps.values())[-1]
+        trans_input = self.cat_feature_maps(self.models[0].module.total_feature_maps, self.models[0].module.extract_layers)[-1]
         self.fusion_channel = trans_input.size(1)
         self.fusion_spatil = trans_input.size(2)
 
@@ -78,42 +73,38 @@ class Trainer():
         self.sd_optimizers = []
         self.sd_schedulers = []
         for i in range(1, self.model_num):
-            if str.startswith(self.opt.model, 'densenet'):
-                sd_model = DIYSelfDistillationModel([456, 312, 168], 2).to(self.device)
-            elif str.startswith(self.opt.model, 'googlenet'):
-                sd_model = DIYSelfDistillationModel([1024, 832, 480], 2).to(self.device)
-            else:
-                sd_model = SelfDistillationModel(input_channel=trans_input.size(1),
-                                                 layer_num=len(self.models[0].extract_layers) - 1).to(self.device)
+            sd_model = SelfDistillationModel(input_channel=self.fusion_channel,
+                                             layer_num=len(self.models[0].module.extract_layers) - 1).to(self.device)
+            sd_model = nn.DataParallel(sd_model, device_ids=self.opt.gpu_ids)
             sd_optimizer = optim.Adam(sd_model.parameters(), weight_decay=self.opt.weight_decay)
             sd_scheduler = utils.get_scheduler(sd_optimizer, self.opt)
             self.sd_models.append(sd_model)
             self.sd_optimizers.append(sd_optimizer)
             self.sd_schedulers.append(sd_scheduler)
-        if str.startswith(self.opt.model, 'densenet'):
-            self.sd_leader_model = DIYSelfDistillationModel([456, 312, 168], 2).to(self.device)
-        elif str.startswith(self.opt.model, 'googlenet'):
-            self.sd_leader_model = DIYSelfDistillationModel([1024, 832, 480], 2).to(self.device)
-        else:
-            self.sd_leader_model = SelfDistillationModel(input_channel=trans_input.size(1),
-                                                         layer_num=len(self.models[0].extract_layers) - 1).to(self.device)
+
+        self.sd_leader_model = SelfDistillationModel(input_channel=self.fusion_channel,
+                                                     layer_num=len(self.models[0].module.extract_layers) - 1).to(self.device)
+        self.sd_leader_model = nn.DataParallel(self.sd_leader_model, device_ids=self.opt.gpu_ids)
         self.sd_leader_optimizer = optim.Adam(self.sd_leader_model.parameters(), weight_decay=self.opt.weight_decay)
         self.sd_leader_scheduler = utils.get_scheduler(self.sd_leader_optimizer, self.opt)
 
     def init_fusion_module(self):
 
-        self.num_classes = 100
+        self.num_classes = 1000
+
+        self.fusion_channel = 512 if str.startswith(self.opt.model, 'resnet') else 1280
+        self.fusion_spatil = 7
 
         self.fusion_module = FusionModule(self.fusion_channel, self.num_classes,
                                           self.fusion_spatil, model_num=self.model_num).to(self.device)
+        self.fusion_module = nn.DataParallel(self.fusion_module, device_ids=self.opt.gpu_ids)
         self.fusion_optimizer = optim.SGD(self.fusion_module.parameters(), lr=self.opt.lr, momentum=self.opt.momentum,
                                           weight_decay=1e-5,
                                           nesterov=True)
-        self.fusion_scheduler = utils.get_scheduler(self.fusion_optimizer, self.opt)
 
     def train(self):
 
-        topk = (1,)
+        topk = (1, 5)
 
         best_acc = [0.0] * self.model_num
         best_epoch = [1] * self.model_num
@@ -128,12 +119,10 @@ class Trainer():
 
         for epoch in range(self.start_epochs, self.epochs):
 
-            self.visualizer.reset()
-
             self.lambda_warmup(epoch)
             self.train_with_test(epoch, topk=topk)
 
-            _, test_acc, _, test_avg_acc, test_ens_acc = self.test(epoch, topk=topk)
+            _, test_acc, test_top5_acc, test_avg_acc, test_ens_acc = self.test(epoch, topk=topk)
 
             for i in range(self.model_num):
                 self.save_models(self.models[i], epoch, str(i), self.opt, isbest=False)
@@ -159,13 +148,9 @@ class Trainer():
                 best_ens_acc = test_ens_acc.avg
                 best_ens_epoch = epoch
 
-            for i, scheduler in enumerate(self.schedulers):
-                if i > 0:
-                    self.sd_schedulers[i-1].step()
+            for scheduler in self.sd_schedulers:
                 scheduler.step()
             self.sd_leader_scheduler.step()
-            self.fusion_scheduler.step()
-            self.leader_scheduler.step()
 
         best_msg = 'Best Models: '
         self.logger.info(
@@ -220,14 +205,17 @@ class Trainer():
             self_distillation_losses.append(utils.AverageMeter())
             accuracy.append(utils.AverageMeter())
 
-        print_freq = len(self.trainLoader.dataset) // self.opt.train_batch_size // 10
-        start_time = time.time()
         dataset_size = len(self.trainLoader.dataset)
+        print_freq = dataset_size // self.opt.train_batch_size // 10
+        start_time = time.time()
         epoch_iter = 0
 
         for batch, (inputs, labels) in enumerate(self.trainLoader):
 
             inputs, labels = inputs.to(self.device), labels.to(self.device)
+
+            self.adjust_learning_rates(epoch, batch, dataset_size // self.train_batch_size)
+
             epoch_iter += self.train_batch_size
 
             ensemble_output = 0.0
@@ -238,10 +226,12 @@ class Trainer():
             for i in range(self.model_num):
                 outputs.append(self.models[i](inputs))
                 ensemble_output += outputs[-1]
-                total_feature_maps.append(list(self.models[i].total_feature_maps.values()))
-                fusion_module_inputs.append(list(self.models[i].total_feature_maps.values())[-1].detach())
+
+                total_feature_maps.append(self.cat_feature_maps(self.models[i].module.total_feature_maps, self.models[i].module.extract_layers))
+                fusion_module_inputs.append(total_feature_maps[-1][-1].detach())
             fusion_module_inputs = torch.cat(fusion_module_inputs, dim=1)
             fusion_output = self.fusion_module(fusion_module_inputs)
+
             ensemble_output = ensemble_output / self.model_num
 
             # backward models
@@ -255,7 +245,7 @@ class Trainer():
                         loss_dml += self.criterion_KL(F.log_softmax(outputs[i] / self.temperature, dim=1),
                                                       F.softmax(outputs[j].detach() / self.temperature, dim=1))
 
-                if i != 0:
+                if i != 0 and self.lambda_diversity > 0:
                     current_attention_map = total_feature_maps[i][-1].pow(2).mean(1, keepdim=True)
                     other_attention_map = total_feature_maps[i - 1][-1].detach().pow(2).mean(1, keepdim=True)
                     loss_diversity = self.lambda_diversity * self.diversity_loss(current_attention_map,
@@ -265,6 +255,7 @@ class Trainer():
                                                                         total_feature_maps[i],
                                                                         input_feature_map=self.diversity_target(
                                                                             total_feature_maps[i - 1][-1].detach()))
+
                 else:
                     loss_diversity = 0.0
                     loss_self_distllation = 0.0
@@ -300,23 +291,23 @@ class Trainer():
             fusion_prec = utils.accuracy(fusion_output, labels.data, topk=topk)
             fusion_accuracy.update(fusion_prec[0], inputs.size(0))
 
-            # backward leader model
-            leader_feature_maps = list(self.leader_model.total_feature_maps.values())
+            # backward leader models
+            leader_feature_maps = self.cat_feature_maps(self.leader_model.module.total_feature_maps, self.leader_model.module.extract_layers)
+            fusion_feature_maps = self.cat_feature_maps(self.fusion_module.module.total_feature_maps, self.fusion_module.module.extract_layers)
             loss_leader_ce = self.criterion_CE(leader_output, labels)
             loss_leader_ensemble = (self.temperature ** 2) * self.criterion_KL(
                 F.log_softmax(leader_output / self.temperature, dim=1),
                 F.softmax(fusion_output.detach() / self.temperature, dim=1))
             loss_leader_fusion = self.lambda_fusion * self.fusion_loss(
                 leader_feature_maps[-1].pow(2).mean(1, keepdim=True),
-                list(self.fusion_module.total_feature_maps.values())[-1].detach().pow(2).mean(1, keepdim=True))
+                fusion_feature_maps[-1].detach().pow(2).mean(1, keepdim=True))
             loss_leader_trans_fusion = self.lambda_fusion * \
                                        self.fusion_loss(leader_trans_fusion_output.pow(2).mean(1, keepdim=True),
                                                            fusion_module_inputs.pow(2).mean(1, keepdim=True))
+
             loss_leader_self_distillation = self.lambda_fusion * \
                                             self.self_distillation_loss(self.sd_leader_model, leader_feature_maps,
-                                                                        input_feature_map=list(
-                                                                            self.fusion_module.total_feature_maps.values())[
-                                                                            -1].detach())
+                                                                        input_feature_map=fusion_feature_maps[-1].detach())
             loss_leader = loss_leader_ce + loss_leader_ensemble + loss_leader_fusion + loss_leader_trans_fusion + loss_leader_self_distillation
 
             self.leader_optimizer.zero_grad()
@@ -359,30 +350,8 @@ class Trainer():
                 cost_time = current_time - start_time
 
                 msg = 'Epoch[{}] ({}/{})\tTime {:.2f}s\t'.format(
-                    epoch, batch * self.train_batch_size, len(self.trainLoader.dataset), cost_time)
-                total_losses = OrderedDict()
-                total_losses['Fusion CE'] = float(fusion_ce_loss.avg)
-                total_losses['Fusion Ensemble'] = float(fusion_ensemble_loss.avg)
-                total_losses['Fusion Accuracy'] = float(fusion_accuracy.avg)
-                total_losses['Fusion Loss'] = float(fusion_loss.avg)
-
-                total_losses['Leader CE'] = float(leader_ce_loss.avg)
-                total_losses['Leader Ensemble'] = float(leader_ensemble_loss.avg)
-                total_losses['Leader Accuracy'] = float(leader_accuracy.avg)
-                total_losses['Leader Self Distillation Feature'] = float(leader_self_distillation_feature_loss.avg)
-                total_losses['Leader Self Distillation Attention'] = float(leader_self_distillation_attention_loss.avg)
-                total_losses['Leader Self Distillation'] = float(leader_self_distillation_loss.avg)
-                total_losses['Leader Fusion'] = float(leader_fusion_loss.avg)
-                total_losses['Leader Trans Fusion'] = float(leader_trans_fusion_loss.avg)
-                total_losses['Leader Loss'] = float(leader_loss.avg)
+                    epoch, batch * self.train_batch_size, dataset_size, cost_time)
                 for i in range(self.model_num):
-                    total_losses['CE%d' % i] = float(ce_losses[i].avg)
-                    total_losses['DML%d' % i] = float(dml_losses[i].avg)
-                    total_losses['Diversity%d' % i] = float(diversity_losses[i].avg)
-                    total_losses['Self Distillation Feature%d' % i] = float(self_distillation_feature_losses[i].avg)
-                    total_losses['Self Distillation Attention%d' % i] = float(self_distillation_attention_losses[i].avg)
-                    total_losses['Self Distillation%d' % i] = float(self_distillation_losses[i].avg)
-                    total_losses['Loss%d' % i] = float(losses[i].avg)
 
                     msg += '|Model[{}]: Loss:{:.4f}\t' \
                            'CE Loss:{:.4f}\tDML Loss:{:.4f}\t' \
@@ -409,23 +378,21 @@ class Trainer():
                     float(leader_self_distillation_attention_loss.avg),
                     float(leader_self_distillation_loss.avg), float(leader_accuracy.avg))
 
-                if self.opt.display_id > 0:
-                    self.visualizer.plot_current_losses(epoch,
-                                                        float(epoch_iter / (dataset_size * self.train_batch_size)),
-                                                        total_losses)
                 msg += '|Average Acc:{:.2f}\tEnsemble Acc:{:.2f}'.format(float(average_accuracy.avg),
                                                                          float(ensemble_accuracy.avg))
                 self.logger.info(msg)
 
                 start_time = current_time
 
-    def test(self, epoch, topk=(1,)):
+    def test(self, epoch, topk=(1,5)):
 
         losses = []
         accuracy = []
         top5_accuracy = []
         fusion_accuracy = utils.AverageMeter()
+        fusion_top5_accuracy = utils.AverageMeter()
         leader_accuracy = utils.AverageMeter()
+        leader_top5_accuracy = utils.AverageMeter()
         average_accuracy = utils.AverageMeter()
         ensemble_accuracy = utils.AverageMeter()
         self.fusion_module.eval()
@@ -436,10 +403,14 @@ class Trainer():
             top5_accuracy.append(utils.AverageMeter())
         accuracy.append(fusion_accuracy)
         accuracy.append(leader_accuracy)
+        top5_accuracy.append(fusion_top5_accuracy)
+        top5_accuracy.append(leader_top5_accuracy)
+
 
         start_time = time.time()
         with torch.no_grad():
-            for batch_idx, (inputs, labels) in enumerate(self.testLoader):
+            for batch, (inputs, labels) in enumerate(self.trainLoader):
+
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
 
                 outputs = []
@@ -447,7 +418,7 @@ class Trainer():
                 leader_output, _ = self.leader_model(inputs)
                 for i in range(self.model_num):
                     outputs.append(self.models[i](inputs))
-                    fusion_module_inputs.append(list(self.models[i].total_feature_maps.values())[-1].detach())
+                    fusion_module_inputs.append(self.cat_feature_maps(self.models[i].module.total_feature_maps, self.models[i].module.extract_layers)[-1].detach())
                 fusion_module_inputs = torch.cat(fusion_module_inputs, dim=1)
                 fusion_output = self.fusion_module(fusion_module_inputs)
 
@@ -460,9 +431,11 @@ class Trainer():
 
                 fusion_prec = utils.accuracy(fusion_output, labels.data, topk=topk)
                 fusion_accuracy.update(fusion_prec[0], inputs.size(0))
+                fusion_top5_accuracy.update(fusion_prec[1], inputs.size(0))
 
                 leader_prec = utils.accuracy(leader_output, labels.data, topk=topk)
                 leader_accuracy.update(leader_prec[0], inputs.size(0))
+                leader_top5_accuracy.update(leader_prec[1], inputs.size(0))
 
                 average_prec = utils.average_accuracy(outputs, labels.data, topk=topk)
                 ensemble_prec = utils.ensemble_accuracy(outputs, labels.data, topk=topk)
@@ -475,9 +448,9 @@ class Trainer():
             msg = 'Epoch[{}]\tTime {:.2f}s\t'.format(epoch, current_time - start_time)
 
             for i in range(self.model_num):
-                msg += 'Model[{}]:\tAccuracy {:.2f}%\t'.format(i, float(accuracy[i].avg))
-            msg += 'Model[{}]:\tAccuracy {:.2f}%\t'.format('Fusion', float(fusion_accuracy.avg))
-            msg += 'Model[{}]:\tAccuracy {:.2f}%\t'.format('Leader', float(leader_accuracy.avg))
+                msg += 'Model[{}]:\tAccuracy {:.2f}%\tTop5 Accuracy {:.2f}'.format(i, float(accuracy[i].avg), float(top5_accuracy[i].avg))
+            msg += 'Model[{}]:\tTop1 Accuracy {:.2f}%\tTop5 Accuracy {:.2f}'.format('Fusion', float(fusion_accuracy.avg), float(fusion_top5_accuracy.avg))
+            msg += 'Model[{}]:\tAccuracy {:.2f}%\tTop5 Accuracy {:.2f}'.format('Leader', float(leader_accuracy.avg), float(leader_top5_accuracy.avg))
 
             msg += 'Average Acc:{:.2f}\tEnsemble Acc:{:.2f}'.format(float(average_accuracy.avg),
                                                                     float(ensemble_accuracy.avg))
@@ -493,7 +466,7 @@ class Trainer():
         sd_attention_loss = 0.0
         input = target_feature_maps[-1].detach()
         sd_model(input)
-        total_feature_maps = list(sd_model.total_feature_maps.values())
+        total_feature_maps = self.cat_feature_maps(sd_model.module.total_feature_maps, sd_model.module.extract_layers)
         total_feature_maps.reverse()
 
         for i, feature_map in enumerate(total_feature_maps):
@@ -525,7 +498,7 @@ class Trainer():
         else:
             input_feature_map = input_feature_map.detach()
         sd_model(input_feature_map)
-        target_feature_maps = list(sd_model.total_feature_maps.values())
+        target_feature_maps = self.cat_feature_maps(sd_model.module.total_feature_maps, sd_model.module.extract_layers)
         target_feature_maps.reverse()
 
         for i, feature_map in enumerate(target_feature_maps):
@@ -558,14 +531,6 @@ class Trainer():
         target_y = (norm_y / 2 - attention_y) * torch.sign(attention_y - threshold) + norm_y / 2
         diff = (target_y - attention_y.view(attention_y.size(0), -1))
         return y + ((diff * norm_y / y.size(1)).view(attention_y_size))
-
-    def l2_loss(self, source_feature_maps, target_feature_maps):
-
-        l2_loss = 0.0
-        for i, feature_map in enumerate(source_feature_maps):
-            l2_loss += self.attention_loss(feature_map.pow(2).mean(1, keepdim=True),
-                                           target_feature_maps[i].detach().pow(2).mean(1, keepdim=True))
-        return l2_loss
 
     def diversity_loss(self, x, y):
 
@@ -600,7 +565,7 @@ class Trainer():
         save_dir = os.path.join(opt.checkpoints_dir, opt.name, 'checkpoints')
         utils.mkdirs(save_dir)
         ckpt = {
-            'weight': model.state_dict(),
+            'weight': model.module.state_dict(),
             'epoch': epoch,
             'cfg': opt.model,
             'index': name
@@ -609,3 +574,37 @@ class Trainer():
             torch.save(ckpt, os.path.join(save_dir, 'model%s_best.pth' % name))
         else:
             torch.save(ckpt, os.path.join(save_dir, 'model%s_%d.pth' % (name, epoch)))
+
+    def cat_feature_maps(self, total_feature_maps, extract_layers):
+
+        catted_feature_maps = {}
+        for layer in extract_layers:
+
+            layer_feature_maps = []
+            for i in self.opt.gpu_ids:
+                name = layer + 'cuda:%d' % i
+                layer_feature_maps.append(total_feature_maps[name].to(self.device))
+            catted_feature_maps[layer] = torch.cat(layer_feature_maps, dim=0)
+
+        return list(catted_feature_maps.values())
+
+    def adjust_learning_rates(self, epoch, step, len_epoch):
+
+        def adjust_lr(optimizer, epoch, step, len_epoch):
+
+            factor = epoch // 30
+            if epoch >= 80:
+                factor = factor + 1
+            lr = self.opt.lr * (0.1 ** factor)
+
+            # Warmup
+            if epoch < 5:
+                lr = lr * float(1 + step + epoch * len_epoch) / (5. * len_epoch)
+
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+
+        for i in range(self.model_num):
+            adjust_lr(self.optimizers[i], epoch, step, len_epoch)
+        adjust_lr(self.leader_optimizer, epoch, step, len_epoch)
+        adjust_lr(self.fusion_optimizer, epoch, step, len_epoch)

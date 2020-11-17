@@ -48,8 +48,45 @@ class SelfDistillationModel(nn.Module):
 
         def get_activation(maps, name):
             def get_output_hook(module, input, output):
+                maps[name+str(output.device)] = output
+
+            return get_output_hook
+
+        def add_hook(model, maps, extract_layers):
+            for name, module in model.named_modules():
+                if name in extract_layers:
+                    module.register_forward_hook(get_activation(maps, name))
+
+        add_hook(self, self.total_feature_maps, self.extract_layers)
+
+class DIYSelfDistillationModel(nn.Module):
+
+    def __init__(self, channel_nums, layer_num):
+        super(DIYSelfDistillationModel, self).__init__()
+
+        self.layer_num = layer_num
+        self.total_feature_maps = {}
+
+        for i in range(layer_num):
+            setattr(self, 'layer%d' % i, SelfDistillationModule(channel_nums[i], channel_nums[i+1]))
+
+        self.register_hook()
+
+    def forward(self, x):
+
+        for i in range(self.layer_num):
+            x = getattr(self, 'layer%d' % i)(x)
+
+        return x
+
+    def register_hook(self):
+
+        self.extract_layers = [('layer%d' % i) for i in range(self.layer_num)]
+
+        def get_activation(maps, name):
+            def get_output_hook(module, input, output):
                 # maps[name] = output.pow(2).mean(1, keepdim=True)
-                maps[name] = output
+                maps[name+str(output.device)] = output
 
             return get_output_hook
 
