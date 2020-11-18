@@ -75,7 +75,7 @@ We provide the student leader models in the experiments, along with their traini
 | GoogLeNet | CIFAR-100 |       81.52       | [Link](https://drive.google.com/drive/folders/1GHKJCrZTqzxZAMSy-s3uGjDY_ee-eRoK?usp=sharing) |
 | GoogLeNet | CIFAR-100 |       81.93       | [Link](https://drive.google.com/drive/folders/1yGY8vdiLDsilAHwNF6guMd9Rx-veQTA3?usp=sharing) |
 | GoogLeNet | CIFAR-100 |       81.34       | [Link](https://drive.google.com/drive/folders/1QExEqMfsIQaPX3egXp72Teq9DuT0yjnj?usp=sharing) |
-| ResNet-18 | ImageNet  |       70.87       | [Link](https://drive.google.com/drive/folders/1QExEqMfsIQaPX3egXp72Teq9DuT0yjnj?usp=sharing) |
+| ResNet-18 | ImageNet  |       70.87       | [Link](https://drive.google.com/drive/folders/10METcMuXLC14L48R3NgJahssVgZsAiJT?usp=sharing) |
 | ResNet-34 | ImageNet  |       74.69       | [Link](https://drive.google.com/drive/folders/1mFlbgc_EPruHRKgaIS8K3wKDytGS0Keq?usp=sharing) |
 
 You can use the following code to test our models.
