@@ -10,7 +10,7 @@ import math
 import utils.util as utils
 from models import create_model
 from data import create_dataLoader
-from models.self_distillation import SelfDistillationModel, DIYSelfDistillationModel
+from models.self_distillation import SelfDistillationModel
 from models.fusion_module import FusionModule
 
 
@@ -19,9 +19,10 @@ class Trainer():
     def __init__(self, opt, logger):
 
         self.opt = opt
-        self.opt.n_epochs = 90 if str.startswith(self.opt.model, 'resnet') else 180 # mobilenet 180 epoch
-        self.opt.lr_decay_iters = [30, 60, 80] if str.startswith(self.opt.model, 'resnet') else [60, 120, 160]
-        # self.opt.train_batch_size = 256
+        self.opt.n_epochs = 90
+        self.opt.lr_decay_iters = [30, 60, 80]
+        self.opt.train_batch_size = 256
+        self.opt.test_batch_size = 256
         self.opt.isTrain = True
         self.logger = logger
         self.device = torch.device(f'cuda:{opt.gpu_ids[0]}') if torch.cuda.is_available() else 'cpu'
@@ -92,7 +93,7 @@ class Trainer():
 
         self.num_classes = 1000
 
-        self.fusion_channel = 512 if str.startswith(self.opt.model, 'resnet') else 1280
+        self.fusion_channel = 512
         self.fusion_spatil = 7
 
         self.fusion_module = FusionModule(self.fusion_channel, self.num_classes,
@@ -384,15 +385,13 @@ class Trainer():
 
                 start_time = current_time
 
-    def test(self, epoch, topk=(1,5)):
+    def test(self, epoch, topk=(1,)):
 
         losses = []
         accuracy = []
         top5_accuracy = []
         fusion_accuracy = utils.AverageMeter()
-        fusion_top5_accuracy = utils.AverageMeter()
         leader_accuracy = utils.AverageMeter()
-        leader_top5_accuracy = utils.AverageMeter()
         average_accuracy = utils.AverageMeter()
         ensemble_accuracy = utils.AverageMeter()
         self.fusion_module.eval()
@@ -403,14 +402,10 @@ class Trainer():
             top5_accuracy.append(utils.AverageMeter())
         accuracy.append(fusion_accuracy)
         accuracy.append(leader_accuracy)
-        top5_accuracy.append(fusion_top5_accuracy)
-        top5_accuracy.append(leader_top5_accuracy)
-
 
         start_time = time.time()
         with torch.no_grad():
-            for batch, (inputs, labels) in enumerate(self.trainLoader):
-
+            for batch_idx, (inputs, labels) in enumerate(self.testLoader):
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
 
                 outputs = []
@@ -431,11 +426,9 @@ class Trainer():
 
                 fusion_prec = utils.accuracy(fusion_output, labels.data, topk=topk)
                 fusion_accuracy.update(fusion_prec[0], inputs.size(0))
-                fusion_top5_accuracy.update(fusion_prec[1], inputs.size(0))
 
                 leader_prec = utils.accuracy(leader_output, labels.data, topk=topk)
                 leader_accuracy.update(leader_prec[0], inputs.size(0))
-                leader_top5_accuracy.update(leader_prec[1], inputs.size(0))
 
                 average_prec = utils.average_accuracy(outputs, labels.data, topk=topk)
                 ensemble_prec = utils.ensemble_accuracy(outputs, labels.data, topk=topk)
@@ -448,9 +441,9 @@ class Trainer():
             msg = 'Epoch[{}]\tTime {:.2f}s\t'.format(epoch, current_time - start_time)
 
             for i in range(self.model_num):
-                msg += 'Model[{}]:\tAccuracy {:.2f}%\tTop5 Accuracy {:.2f}'.format(i, float(accuracy[i].avg), float(top5_accuracy[i].avg))
-            msg += 'Model[{}]:\tTop1 Accuracy {:.2f}%\tTop5 Accuracy {:.2f}'.format('Fusion', float(fusion_accuracy.avg), float(fusion_top5_accuracy.avg))
-            msg += 'Model[{}]:\tAccuracy {:.2f}%\tTop5 Accuracy {:.2f}'.format('Leader', float(leader_accuracy.avg), float(leader_top5_accuracy.avg))
+                msg += 'Model[{}]:\tAccuracy {:.2f}%\t'.format(i, float(accuracy[i].avg))
+            msg += 'Model[{}]:\tAccuracy {:.2f}%\t'.format('Fusion', float(fusion_accuracy.avg))
+            msg += 'Model[{}]:\tAccuracy {:.2f}%\t'.format('Leader', float(leader_accuracy.avg))
 
             msg += 'Average Acc:{:.2f}\tEnsemble Acc:{:.2f}'.format(float(average_accuracy.avg),
                                                                     float(ensemble_accuracy.avg))
