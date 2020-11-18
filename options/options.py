@@ -49,9 +49,6 @@ parser.add_argument('--lambda_diversity', type=float, default=1e-5, help='the co
 parser.add_argument('--lambda_fusion', type=float, default=10.0, help='the coefficient of distilling the fusion knowledge for the student leader. default:10.0')
 parser.add_argument('--lambda_self_distillation', type=float, default=1000.0, help='the coefficient for self-distillation train loss. default:1000.0')
 
-parser.add_argument('--load_path1', type=str, default=None, help='The path of load model. default:None')
-parser.add_argument('--load_path2', type=str, default=None, help='The path of load model. default:None')
-
 
 def print_options(opt, parser):
     """Print and save options

@@ -26,7 +26,7 @@ class Data:
             dataset=trainDataset,
             batch_size=opt.train_batch_size,
             shuffle=True,
-            num_workers=opt.num_threads,
+            num_workers=8,
             pin_memory=pin_memory,
         )
 
@@ -35,7 +35,7 @@ class Data:
             dataset=testDataset,
             batch_size=opt.test_batch_size,
             shuffle=False,
-            num_workers=opt.num_workers,
+            num_workers=8,
             pin_memory=pin_memory,
         )
 
