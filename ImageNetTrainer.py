@@ -284,7 +284,7 @@ class Trainer():
             fusion_prec = utils.accuracy(fusion_output, labels.data, topk=topk)
             fusion_accuracy.update(fusion_prec[0], inputs.size(0))
 
-            # backward leader models
+            # backward leader model
             leader_feature_maps = list(self.leader_model.total_feature_maps.values())
             loss_leader_ce = self.criterion_CE(leader_output, labels)
             loss_leader_ensemble = (self.temperature ** 2) * self.criterion_KL(
