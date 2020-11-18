@@ -1,0 +1,7 @@
+dominate==2.5.1
+numpy==1.18.1
+opencv-python==4.3.0.36
+six==1.14.0
+torch==1.5.1
+torchvision==0.6.1
+tqdm==4.42.1
