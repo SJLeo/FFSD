@@ -1,4 +1,4 @@
-## Distilling Powerful Student from Online Knowledge Distillation using Feature Fusion and Self-Distillation 
+## Distilling Powerful Student from Online Knowledge Distillation using Feature Fusion and Self-Distillation ([Link](https://arxiv.org/abs/2103.14473))![]( https://visitor-badge.glitch.me/badge?page_id=sjleo.ffsd).
 
 <div align=center><img src="img/framework.png" height = "50%" width = "60%"/></div>
 
