@@ -57,7 +57,7 @@ class Trainer():
 
         self.leader_model = create_model(self.opt, leader=True, trans_fusion_info=(self.fusion_channel, self.model_num)).to(self.device)
         self.leader_optimizer = optim.SGD(self.leader_model.parameters(), lr=opt.lr, momentum=opt.momentum,
-                                          weight_decay=self.opt.leader_weight_decay,
+                                          weight_decay=self.opt.weight_decay,
                                           nesterov=True)
         self.leader_scheduler = utils.get_scheduler(self.leader_optimizer, opt)
 
